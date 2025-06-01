@@ -41,7 +41,8 @@ function App() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
       
-      const response = await fetch('http://localhost:8000/summarize', {
+const response = await fetch('https://summify-backend-mue3.onrender.com/summarize', {
+
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',

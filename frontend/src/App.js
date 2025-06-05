@@ -9,6 +9,11 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef(null);
 
+  // Configuration for different environments
+  const API_BASE_URL = process.env.NODE_ENV === 'production' 
+    ? 'https://summify-backend-mue3.onrender.com' 
+    : 'http://localhost:8000';
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
@@ -38,11 +43,12 @@ function App() {
     
     try {
       console.log("Sending request to backend...");
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
+      console.log("API URL:", `${API_BASE_URL}/summarize`);
       
-const response = await fetch('https://summify-backend-mue3.onrender.com/summarize', {
-
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minute timeout for proxy requests
+      
+      const response = await fetch(`${API_BASE_URL}/summarize`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -61,7 +67,6 @@ const response = await fetch('https://summify-backend-mue3.onrender.com/summariz
           const errorData = await response.json();
           errorMessage = errorData.detail || errorMessage;
         } catch {
-          // If can't parse JSON, use status text
           errorMessage = response.statusText || errorMessage;
         }
         throw new Error(errorMessage);
@@ -74,8 +79,14 @@ const response = await fetch('https://summify-backend-mue3.onrender.com/summariz
         throw new Error("No summary received from server");
       }
       
+      // Add proxy status info if available
+      let summaryText = data.summary;
+      if (data.proxies_status) {
+        console.log("Proxy status:", data.proxies_status);
+      }
+      
       setMessages(prev => [...prev, { 
-        text: data.summary, 
+        text: summaryText, 
         sender: 'bot' 
       }]);
       
@@ -86,10 +97,14 @@ const response = await fetch('https://summify-backend-mue3.onrender.com/summariz
       
       if (error.name === 'AbortError') {
         errorMessage = "Request timed out. The video might be too long or the server is busy. Please try again.";
-      } else if (error.message.includes('Failed to fetch')) {
-        errorMessage = "Couldn't connect to server. Make sure the backend is running on http://localhost:8000";
-      } else if (error.message.includes('NetworkError')) {
-        errorMessage = "Network error. Please check your connection and try again.";
+      } else if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+        errorMessage = `Couldn't connect to server. Please check if the backend is running at ${API_BASE_URL}`;
+      } else if (error.message.includes('captions') || error.message.includes('transcript')) {
+        errorMessage = "This video doesn't have English captions/subtitles available. Please try a different video.";
+      } else if (error.message.includes('Invalid YouTube URL')) {
+        errorMessage = "The YouTube URL format is not recognized. Please check the URL and try again.";
+      } else if (error.message.includes('API key')) {
+        errorMessage = "Server configuration error. Please contact support.";
       } else {
         errorMessage = error.message;
       }
@@ -115,6 +130,22 @@ const response = await fetch('https://summify-backend-mue3.onrender.com/summariz
     }
   };
 
+  const handleClearChat = () => {
+    setMessages([
+      { text: "Hi! Paste any YouTube URL and I'll summarize it for you. 📺", sender: 'bot' }
+    ]);
+  };
+
+  const formatMessage = (text) => {
+    // Simple formatting for better readability
+    return text.split('\n').map((line, index) => (
+      <React.Fragment key={index}>
+        {line}
+        {index < text.split('\n').length - 1 && <br />}
+      </React.Fragment>
+    ));
+  };
+
   React.useEffect(scrollToBottom, [messages]);
 
   return (
@@ -122,6 +153,11 @@ const response = await fetch('https://summify-backend-mue3.onrender.com/summariz
       <header className="header">
         <h1>🎬 SummifyAI</h1>
         <p>Get instant AI summaries of YouTube videos</p>
+        <div className="header-actions">
+          <button onClick={handleClearChat} className="clear-btn">
+            🗑️ Clear Chat
+          </button>
+        </div>
       </header>
       
       <div className="chat-container">
@@ -129,7 +165,7 @@ const response = await fetch('https://summify-backend-mue3.onrender.com/summariz
           {messages.map((msg, i) => (
             <div key={i} className={`message ${msg.sender}`}>
               <div className="message-content">
-                {msg.text}
+                {formatMessage(msg.text)}
               </div>
             </div>
           ))}
@@ -142,7 +178,11 @@ const response = await fetch('https://summify-backend-mue3.onrender.com/summariz
                   <span></span>
                   <span></span>
                 </div>
-                <span className="loading-text">Analyzing video and generating summary...</span>
+                <span className="loading-text">
+                  Analyzing video and generating summary...
+                  <br />
+                  <small>This may take up to 2 minutes for longer videos</small>
+                </span>
               </div>
             </div>
           )}
@@ -172,14 +212,20 @@ const response = await fetch('https://summify-backend-mue3.onrender.com/summariz
           
           <div className="input-hint">
             💡 Tip: Works best with videos that have captions/subtitles
+            <br />
           </div>
         </form>
       </div>
+      
       <footer className="footer">
-      <p>© {new Date().getFullYear()} Hasan Himzawi. All Rights Reserved.</p>
-    </footer>
-  </div>
-);
+        <p>© {new Date().getFullYear()} Hasan Himzawi. All Rights Reserved.</p>
+        <div className="footer-info">
+          <span>Environment: {process.env.NODE_ENV || 'development'}</span>
+          <span>API: {API_BASE_URL}</span>
+        </div>
+      </footer>
+    </div>
+  );
 }
 
 export default App;

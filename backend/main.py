@@ -7,6 +7,9 @@ from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 from urllib.parse import urlparse, parse_qs
 import json
+import random
+import time
+from typing import Optional, List, Dict
 
 load_dotenv()
 
@@ -15,7 +18,7 @@ app = FastAPI()
 # Configure CORS - Allow all origins for development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Changed from localhost only
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -23,6 +26,67 @@ app.add_middleware(
 
 class URLRequest(BaseModel):
     url: str
+
+# Proxy list with working proxies
+PROXY_LIST = [
+    {"ip": "197.44.247.35", "port": "3128", "country": "EG"},
+    {"ip": "45.140.143.77", "port": "18080", "country": "NL"},
+    {"ip": "159.69.57.208", "port": "80", "country": "DE"},
+    {"ip": "195.231.69.20", "port": "80", "country": "IT"},
+    {"ip": "57.129.81.20", "port": "18080", "country": "DE"},
+    {"ip": "185.234.65.66", "port": "1080", "country": "NL"},
+    {"ip": "113.181.140.80", "port": "8080", "country": "VN"},
+    {"ip": "123.140.160.12", "port": "5031", "country": "KR"},
+    {"ip": "123.140.146.3", "port": "5031", "country": "KR"},
+    {"ip": "139.59.34.20", "port": "8080", "country": "IN"},
+    {"ip": "123.140.146.2", "port": "5031", "country": "KR"},
+    {"ip": "123.140.146.57", "port": "5031", "country": "KR"},
+    {"ip": "45.67.221.230", "port": "80", "country": "DE"},
+    {"ip": "198.49.68.80", "port": "80", "country": "US"},
+]
+
+class ProxyManager:
+    def __init__(self, proxy_list: List[Dict]):
+        self.proxy_list = proxy_list
+        self.working_proxies = proxy_list.copy()
+        self.failed_proxies = []
+        self.current_proxy_index = 0
+        
+    def get_proxy_dict(self, proxy_info: Dict) -> Dict:
+        """Convert proxy info to requests-compatible format"""
+        proxy_url = f"http://{proxy_info['ip']}:{proxy_info['port']}"
+        return {
+            'http': proxy_url,
+            'https': proxy_url
+        }
+    
+    def get_next_proxy(self) -> Optional[Dict]:
+        """Get next working proxy, cycling through the list"""
+        if not self.working_proxies:
+            # If no working proxies, reset the list and try again
+            print("No working proxies found, resetting proxy list...")
+            self.working_proxies = self.proxy_list.copy()
+            self.failed_proxies = []
+            
+        if not self.working_proxies:
+            return None
+            
+        # Randomly select a proxy to avoid patterns
+        proxy_info = random.choice(self.working_proxies)
+        return self.get_proxy_dict(proxy_info)
+    
+    def mark_proxy_failed(self, proxy_dict: Dict):
+        """Mark a proxy as failed and remove from working list"""
+        proxy_url = proxy_dict.get('http', '')
+        for proxy_info in self.working_proxies:
+            if f"{proxy_info['ip']}:{proxy_info['port']}" in proxy_url:
+                print(f"Marking proxy as failed: {proxy_info['ip']}:{proxy_info['port']}")
+                self.working_proxies.remove(proxy_info)
+                self.failed_proxies.append(proxy_info)
+                break
+
+# Initialize proxy manager
+proxy_manager = ProxyManager(PROXY_LIST)
 
 def extract_video_id(url: str) -> str:
     """Extract video ID from various YouTube URL formats"""
@@ -33,7 +97,6 @@ def extract_video_id(url: str) -> str:
         if parsed.hostname in ("www.youtube.com", "youtube.com", "m.youtube.com"):
             if "v=" in url:
                 return parse_qs(parsed.query).get("v", [None])[0]
-            # Handle /watch?v= format
             elif "/watch" in parsed.path:
                 return parse_qs(parsed.query).get("v", [None])[0]
         return None
@@ -41,8 +104,47 @@ def extract_video_id(url: str) -> str:
         print(f"Error extracting video ID: {e}")
         return None
 
+def make_request_with_proxy(url: str, max_retries: int = 3) -> Optional[requests.Response]:
+    """Make HTTP request using proxy rotation"""
+    for attempt in range(max_retries):
+        proxy_dict = proxy_manager.get_next_proxy()
+        
+        if not proxy_dict:
+            print("No proxies available, trying direct connection...")
+            try:
+                response = requests.get(url, timeout=10)
+                return response
+            except Exception as e:
+                print(f"Direct connection failed: {e}")
+                return None
+        
+        try:
+            print(f"Attempt {attempt + 1}: Using proxy {proxy_dict['http']}")
+            response = requests.get(
+                url, 
+                proxies=proxy_dict, 
+                timeout=15,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+            )
+            
+            if response.status_code == 200:
+                print(f"✅ Proxy request successful")
+                return response
+            else:
+                print(f"Proxy returned status {response.status_code}")
+                proxy_manager.mark_proxy_failed(proxy_dict)
+                
+        except Exception as e:
+            print(f"Proxy request failed: {e}")
+            proxy_manager.mark_proxy_failed(proxy_dict)
+            continue
+    
+    return None
+
 def get_transcript(video_url: str) -> str:
-    """Get transcript from YouTube video with multiple fallback methods"""
+    """Get transcript from YouTube video with simplified approach"""
     try:
         video_id = extract_video_id(video_url)
         if not video_id:
@@ -73,24 +175,31 @@ def get_transcript(video_url: str) -> str:
             
             # Debug: Print available transcripts
             print("Available transcripts:")
-            for transcript in transcript_list_obj:
-                print(f"  - Language: {transcript.language}, Code: {transcript.language_code}, Generated: {transcript.is_generated}")
+            available_transcripts = []
+            try:
+                for transcript in transcript_list_obj:
+                    print(f"  - Language: {transcript.language}, Code: {transcript.language_code}, Generated: {transcript.is_generated}")
+                    available_transcripts.append(transcript)
+            except Exception as list_debug_error:
+                print(f"Error listing transcripts: {list_debug_error}")
             
-            # Try to find English transcript
+            # Find English transcript
             english_transcript = None
             
             # First try manually created English
             try:
                 english_transcript = transcript_list_obj.find_manually_created_transcript(['en'])
                 print("Found manually created English transcript")
-            except:
+            except Exception as manual_error:
+                print(f"No manual English transcript: {manual_error}")
                 try:
                     # Then auto-generated English
                     english_transcript = transcript_list_obj.find_generated_transcript(['en'])
                     print("Found auto-generated English transcript")
-                except:
+                except Exception as auto_error:
+                    print(f"No auto-generated English transcript: {auto_error}")
                     # Finally any English variant
-                    for transcript in transcript_list_obj:
+                    for transcript in available_transcripts:
                         if transcript.language_code.startswith('en'):
                             english_transcript = transcript
                             print(f"Found English transcript: {transcript.language_code}")
@@ -98,35 +207,32 @@ def get_transcript(video_url: str) -> str:
             
             if english_transcript:
                 print(f"Fetching transcript data...")
-                fetched_data = english_transcript.fetch()
-                
-                print(f"Fetched data type: {type(fetched_data)}")
-                print(f"Fetched data length: {len(fetched_data) if hasattr(fetched_data, '__len__') else 'N/A'}")
-                
-                # Debug: Print first few entries
-                if hasattr(fetched_data, '__iter__'):
-                    for i, entry in enumerate(fetched_data):
-                        if i < 3:  # Print first 3 entries
-                            print(f"Entry {i}: {type(entry)} - {entry}")
-                        else:
-                            break
-                
-                # Extract text from transcript entries
-                full_text = ""
-                if isinstance(fetched_data, list):
-                    for entry in fetched_data:
-                        if isinstance(entry, dict) and 'text' in entry:
-                            full_text += entry['text'] + " "
-                        elif hasattr(entry, 'text'):
-                            full_text += str(entry.text) + " "
-                        else:
-                            print(f"Unhandled entry type: {type(entry)} - {entry}")
-                
-                if full_text.strip():
-                    print(f"✅ List method successful - transcript length: {len(full_text)} characters")
-                    return full_text.strip()
-                else:
-                    print("❌ No text extracted from transcript entries")
+                try:
+                    fetched_data = english_transcript.fetch()
+                    
+                    print(f"Fetched data type: {type(fetched_data)}")
+                    if hasattr(fetched_data, '__len__'):
+                        print(f"Fetched data length: {len(fetched_data)}")
+                    
+                    # Extract text from transcript entries
+                    full_text = ""
+                    if isinstance(fetched_data, list):
+                        for entry in fetched_data:
+                            if isinstance(entry, dict) and 'text' in entry:
+                                full_text += entry['text'] + " "
+                            elif hasattr(entry, 'text'):
+                                full_text += str(entry.text) + " "
+                            else:
+                                print(f"Unhandled entry type: {type(entry)} - {entry}")
+                    
+                    if full_text.strip():
+                        print(f"✅ List method successful - transcript length: {len(full_text)} characters")
+                        return full_text.strip()
+                    else:
+                        print("❌ No text extracted from transcript entries")
+                        
+                except Exception as fetch_error:
+                    print(f"Error fetching transcript data: {fetch_error}")
             else:
                 print("❌ No English transcript found")
                 
@@ -136,10 +242,11 @@ def get_transcript(video_url: str) -> str:
             traceback.print_exc()
         
         # If we get here, no method worked
-        raise NoTranscriptFound("No English transcript could be retrieved")
+        print("All transcript methods failed")
+        return ""
 
-    except (TranscriptsDisabled, NoTranscriptFound) as e:
-        print(f"No English captions found: {e}")
+    except (TranscriptsDisabled) as e:
+        print(f"Transcripts disabled for this video: {e}")
         return ""
     except Exception as e:
         print(f"Transcript fetch error: {e}")
@@ -153,7 +260,6 @@ def generate_summary(text: str) -> str:
         if not text.strip():
             return "No transcript content to summarize"
         
-        # Check if API key exists
         api_key = os.getenv('OPENROUTER_API_KEY')
         if not api_key:
             return "API key not configured. Please set OPENROUTER_API_KEY in your .env file"
@@ -168,12 +274,12 @@ def generate_summary(text: str) -> str:
             "X-Title": "YouTube TL;DR"
         }
         
-        # Truncate text if too long (keep first 4000 chars to stay within limits)
+        # Truncate text if too long
         if len(text) > 4000:
             text = text[:4000] + "..."
         
         payload = {
-            "model": "deepseek/deepseek-chat:free",  # Updated model name
+            "model": "deepseek/deepseek-chat:free",
             "messages": [
                 {
                     "role": "system", 
@@ -188,22 +294,61 @@ def generate_summary(text: str) -> str:
             "max_tokens": 1000
         }
         
-        response = requests.post(api_url, json=payload, headers=headers, timeout=60)
-        
-        if response.status_code == 401:
-            return "Invalid API key. Please check your OPENROUTER_API_KEY"
-        elif response.status_code == 429:
-            return "Rate limit exceeded. Please try again later"
-        
-        response.raise_for_status()
-        
-        data = response.json()
-        if 'choices' not in data or len(data['choices']) == 0:
-            return "No summary generated by the AI model"
+        # Try direct connection first, then with proxy if needed
+        try:
+            print("Trying direct connection for OpenRouter API...")
+            response = requests.post(
+                api_url, 
+                json=payload, 
+                headers=headers, 
+                timeout=60
+            )
             
-        summary = data['choices'][0]['message']['content']
-        print(f"Summary generated successfully")
-        return summary
+            if response.status_code == 401:
+                return "Invalid API key. Please check your OPENROUTER_API_KEY"
+            elif response.status_code == 429:
+                return "Rate limit exceeded. Please try again later"
+            
+            response.raise_for_status()
+            
+            data = response.json()
+            if 'choices' not in data or len(data['choices']) == 0:
+                return "No summary generated by the AI model"
+                
+            summary = data['choices'][0]['message']['content']
+            print(f"Summary generated successfully")
+            return summary
+            
+        except Exception as direct_error:
+            print(f"Direct API call failed: {direct_error}")
+            
+            # Try with proxy as backup
+            proxy_dict = proxy_manager.get_next_proxy()
+            if proxy_dict:
+                try:
+                    print(f"Trying with proxy: {proxy_dict['http']}")
+                    response = requests.post(
+                        api_url, 
+                        json=payload, 
+                        headers=headers, 
+                        timeout=60,
+                        proxies=proxy_dict
+                    )
+                    
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    if 'choices' in data and len(data['choices']) > 0:
+                        summary = data['choices'][0]['message']['content']
+                        print(f"Summary generated successfully via proxy")
+                        return summary
+                        
+                except Exception as proxy_error:
+                    print(f"Proxy API call failed: {proxy_error}")
+                    proxy_manager.mark_proxy_failed(proxy_dict)
+            
+            # If both direct and proxy fail, return error
+            raise direct_error
         
     except requests.exceptions.Timeout:
         return "Request timed out. Please try again"
@@ -224,7 +369,7 @@ async def summarize_video(request: URLRequest):
         if not any(domain in request.url.lower() for domain in ["youtube.com", "youtu.be"]):
             raise HTTPException(status_code=400, detail="Please provide a valid YouTube URL")
         
-        # Get transcript
+        # Get transcript with proxy support
         transcript = get_transcript(request.url)
         if not transcript:
             raise HTTPException(
@@ -238,7 +383,14 @@ async def summarize_video(request: URLRequest):
         if "API key not configured" in summary:
             raise HTTPException(status_code=500, detail=summary)
         
-        return {"summary": summary, "transcript_length": len(transcript)}
+        return {
+            "summary": summary, 
+            "transcript_length": len(transcript),
+            "proxies_status": {
+                "working": len(proxy_manager.working_proxies),
+                "failed": len(proxy_manager.failed_proxies)
+            }
+        }
         
     except HTTPException:
         raise
@@ -252,14 +404,27 @@ async def summarize_video(request: URLRequest):
 @app.get("/health")
 def health_check():
     """Health check endpoint"""
-    return {"status": "ok", "message": "YouTube TL;DR API is running"}
+    return {
+        "status": "ok", 
+        "message": "YouTube TL;DR API is running",
+        "proxies_status": {
+            "working": len(proxy_manager.working_proxies),
+            "failed": len(proxy_manager.failed_proxies),
+            "total": len(PROXY_LIST)
+        }
+    }
 
 @app.get("/")
 def root():
     """Root endpoint"""
-    return {"message": "YouTube TL;DR API", "endpoints": ["/summarize", "/health"]}
+    return {
+        "message": "YouTube TL;DR API", 
+        "endpoints": ["/summarize", "/health"],
+        "version": "2.0"
+    }
 
 if __name__ == "__main__":
     import uvicorn
-    print("Starting YouTube TL;DR API server...")
+    print("Starting YouTube TL;DR API server with proxy support...")
+    print(f"Loaded {len(PROXY_LIST)} proxies")
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
